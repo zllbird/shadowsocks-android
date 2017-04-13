@@ -25,6 +25,8 @@ import java.net.InetAddress
 import java.util
 import java.util.concurrent.TimeUnit
 import java.util.{Timer, TimerTask}
+import java.net.InetAddress
+import java.net.Inet6Address
 
 import android.app.Service
 import android.content.{BroadcastReceiver, Context, Intent, IntentFilter}
@@ -39,11 +41,11 @@ import com.github.shadowsocks.database.Profile
 import com.github.shadowsocks.plugin.{PluginConfiguration, PluginManager, PluginOptions}
 import com.github.shadowsocks.utils._
 import okhttp3.{Dns, FormBody, OkHttpClient, Request}
-import org.json.JSONObject
+import org.json.{JSONArray, JSONObject}
 
+import scala.collection.JavaConversions._
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
-import scala.collection.JavaConversions._
 import scala.util.Random
 
 trait BaseService extends Service {
@@ -124,6 +126,7 @@ trait BaseService extends Service {
   } else true
 
   def connect() {
+    profile.name = profile.getName  // save original name before it's (possibly) overwritten by IP addresses
     if (profile.host == "198.199.101.152") {
       val holder = app.containerHolder
       val container = holder.getContainer
@@ -325,6 +328,56 @@ trait BaseService extends Service {
     if (pluginPath != null) config
       .put("plugin", Commandline.toString(buildPluginCommandLine()))
       .put("plugin_opts", plugin.toString)
+    IOUtils.writeString(new File(getFilesDir, file), config.toString)
+    file
+  }
+
+  private final def buildRemoteDns(remoteDns: String): String = {
+    val addr = InetAddress.getByName(remoteDns)
+    if (addr.isInstanceOf[Inet6Address])
+      return "[" + remoteDns + "]"
+    remoteDns
+  }
+
+  protected final def buildOvertureConfig(file: String): String = {
+    val config = new JSONObject()
+      .put("BindAddress", ":" + (profile.localPort + 53))
+      .put("RedirectIPv6Record", true)
+      .put("DomainBase64Decode", true)
+      .put("HostsFile", "hosts")
+      .put("MinimumTTL", 3600)
+      .put("CacheSize", 4096)
+    def makeDns(name: String, address: String, edns: Boolean = true) = {
+      val dns = new JSONObject()
+        .put("Name", name)
+        .put("Address", address + ":53")
+        .put("Timeout", 6)
+        .put("EDNSClientSubnet", new JSONObject().put("Policy", "disable"))
+      if (edns) dns
+        .put("Protocol", "tcp")
+        .put("Socks5Address", "127.0.0.1:" + profile.localPort)
+      else dns.put("Protocol", "udp")
+      dns
+    }
+    profile.route match {
+      case Acl.BYPASS_CHN | Acl.BYPASS_LAN_CHN | Acl.GFWLIST | Acl.CUSTOM_RULES => config
+        .put("PrimaryDNS", new JSONArray(Array(
+          makeDns("Primary-1", "119.29.29.29", edns = false),
+          makeDns("Primary-2", "114.114.114.114", edns = false)
+        )))
+        .put("AlternativeDNS", new JSONArray().put(makeDns("Alternative",
+          buildRemoteDns(profile.remoteDns.trim))))
+        .put("IPNetworkFile", "china_ip_list.txt")
+        .put("DomainFile", "gfwlist.txt")
+      case Acl.CHINALIST => config
+        .put("PrimaryDNS", new JSONArray().put(makeDns("Primary", "119.29.29.29")))
+        .put("AlternativeDNS", new JSONArray().put(makeDns("Alternative",
+          buildRemoteDns(profile.remoteDns.trim))))
+      case _ => config
+        .put("PrimaryDNS", new JSONArray().put(makeDns("Primary",
+          buildRemoteDns(profile.remoteDns.trim))))
+        .put("AlternativeDNS", new JSONArray().put(makeDns("Alternative", "208.67.222.222")))
+    }
     IOUtils.writeString(new File(getFilesDir, file), config.toString)
     file
   }

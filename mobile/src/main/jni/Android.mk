@@ -26,10 +26,12 @@ include $(CLEAR_VARS)
 
 SODIUM_SOURCE := \
 	crypto_aead/chacha20poly1305/sodium/aead_chacha20poly1305.c \
-	crypto_core/salsa20/ref/core_salsa20.c \
-	crypto_generichash/blake2/ref/blake2b-compress-ref.c \
-	crypto_generichash/blake2/ref/blake2b-ref.c \
-	crypto_generichash/blake2/ref/generichash_blake2b.c \
+	crypto_aead/xchacha20poly1305/sodium/aead_xchacha20poly1305.c \
+	crypto_core/hchacha20/core_hchacha20.c \
+	crypto_core/salsa/ref/core_salsa_ref.c \
+	crypto_generichash/blake2b/ref/blake2b-compress-ref.c \
+	crypto_generichash/blake2b/ref/blake2b-ref.c \
+	crypto_generichash/blake2b/ref/generichash_blake2b.c \
 	crypto_onetimeauth/poly1305/onetimeauth_poly1305.c \
 	crypto_onetimeauth/poly1305/donna/poly1305_donna.c \
 	crypto_pwhash/crypto_pwhash.c \
@@ -41,10 +43,10 @@ SODIUM_SOURCE := \
 	crypto_pwhash/argon2/pwhash_argon2i.c \
 	crypto_scalarmult/curve25519/scalarmult_curve25519.c \
 	crypto_stream/chacha20/stream_chacha20.c \
-	crypto_stream/chacha20/ref/stream_chacha20_ref.c \
-	crypto_stream/salsa20/ref/stream_salsa20_ref.c \
-	crypto_stream/salsa20/ref/xor_salsa20_ref.c \
-	crypto_verify/16/ref/verify_16.c \
+	crypto_stream/chacha20/ref/chacha20_ref.c \
+	crypto_stream/salsa20/stream_salsa20.c \
+	crypto_stream/salsa20/ref/salsa20_ref.c \
+	crypto_verify/sodium/verify.c \
 	randombytes/randombytes.c \
 	randombytes/sysrandom/randombytes_sysrandom.c \
 	sodium/core.c \
@@ -97,7 +99,7 @@ LIBEVENT_SOURCES := \
 
 LOCAL_MODULE := event
 LOCAL_SRC_FILES := $(addprefix libevent/, $(LIBEVENT_SOURCES))
-LOCAL_CFLAGS := -O2 -I$(LOCAL_PATH)/libevent \
+LOCAL_CFLAGS := -O2 -D_EVENT_HAVE_ARC4RANDOM -I$(LOCAL_PATH)/libevent \
 	-I$(LOCAL_PATH)/libevent/include \
 
 include $(BUILD_STATIC_LIBRARY)
@@ -114,6 +116,22 @@ LOCAL_MODULE := libancillary
 LOCAL_CFLAGS += -O2 -I$(LOCAL_PATH)/libancillary
 
 LOCAL_SRC_FILES := $(addprefix libancillary/, $(ANCILLARY_SOURCE))
+
+include $(BUILD_STATIC_LIBRARY)
+
+########################################################
+## libbloom
+########################################################
+
+include $(CLEAR_VARS)
+
+BLOOM_SOURCE := bloom.c murmur2/MurmurHash2.c
+
+LOCAL_MODULE := libbloom
+LOCAL_CFLAGS += -O2 -I$(LOCAL_PATH)/shadowsocks-libev/libbloom \
+				-I$(LOCAL_PATH)/shadowsocks-libev/libbloom/murmur2
+
+LOCAL_SRC_FILES := $(addprefix shadowsocks-libev/libbloom/, $(BLOOM_SOURCE))
 
 include $(BUILD_STATIC_LIBRARY)
 
@@ -224,23 +242,6 @@ LOCAL_CFLAGS := -O2 -std=gnu99 -DUSE_IPTABLES \
 include $(BUILD_SHARED_EXECUTABLE)
 
 ########################################################
-## pdnsd
-########################################################
-
-include $(CLEAR_VARS)
-
-PDNSD_SOURCES  := $(wildcard $(LOCAL_PATH)/pdnsd/src/*.c)
-
-LOCAL_MODULE    := pdnsd
-LOCAL_SRC_FILES := $(PDNSD_SOURCES:$(LOCAL_PATH)/%=%)
-LOCAL_CFLAGS    := -DANDROID -Wall -O2 -I$(LOCAL_PATH)/pdnsd \
-				   -I$(LOCAL_PATH)/include/pdnsd -I$(LOCAL_PATH)/libancillary
-LOCAL_STATIC_LIBRARIES := libancillary
-LOCAL_LDLIBS := -llog
-
-include $(BUILD_SHARED_EXECUTABLE)
-
-########################################################
 ## shadowsocks-libev local
 ########################################################
 
@@ -250,7 +251,7 @@ SHADOWSOCKS_SOURCES := local.c \
 	cache.c udprelay.c utils.c netutils.c json.c jconf.c \
 	acl.c http.c tls.c rule.c \
 	crypto.c aead.c stream.c base64.c \
-	plugin.c \
+	plugin.c ppbloom.c \
 	android.c
 
 LOCAL_MODULE    := ss-local
@@ -264,13 +265,14 @@ LOCAL_CFLAGS    := -Wall -O2 -fno-strict-aliasing -DMODULE_LOCAL \
 					-I$(LOCAL_PATH)/mbedtls/include  \
 					-I$(LOCAL_PATH)/pcre \
 					-I$(LOCAL_PATH)/libudns \
-					-I$(LOCAL_PATH)/shadowsocks-libev/libcork/include \
 					-I$(LOCAL_PATH)/libsodium/src/libsodium/include \
 					-I$(LOCAL_PATH)/libsodium/src/libsodium/include/sodium \
+					-I$(LOCAL_PATH)/shadowsocks-libev/libcork/include \
 					-I$(LOCAL_PATH)/shadowsocks-libev/libipset/include \
+					-I$(LOCAL_PATH)/shadowsocks-libev/libbloom \
 					-I$(LOCAL_PATH)/libev
 
-LOCAL_STATIC_LIBRARIES := libev libmbedtls libipset libcork libudns \
+LOCAL_STATIC_LIBRARIES := libev libmbedtls libipset libcork libbloom libudns \
 	libsodium libancillary libpcre
 
 LOCAL_LDLIBS := -llog
@@ -286,7 +288,7 @@ include $(CLEAR_VARS)
 SHADOWSOCKS_SOURCES := tunnel.c \
 	cache.c udprelay.c utils.c netutils.c json.c jconf.c \
 	crypto.c aead.c stream.c base64.c \
-	plugin.c \
+	plugin.c ppbloom.c \
 	android.c
 
 LOCAL_MODULE    := ss-tunnel
@@ -297,14 +299,15 @@ LOCAL_CFLAGS    := -Wall -O2 -fno-strict-aliasing -DMODULE_TUNNEL \
 					-I$(LOCAL_PATH)/libancillary \
 					-I$(LOCAL_PATH)/include \
 					-I$(LOCAL_PATH)/libudns \
-					-I$(LOCAL_PATH)/shadowsocks-libev/libcork/include \
 					-I$(LOCAL_PATH)/libsodium/src/libsodium/include \
 					-I$(LOCAL_PATH)/libsodium/src/libsodium/include/sodium \
 					-I$(LOCAL_PATH)/mbedtls/include \
 					-I$(LOCAL_PATH)/libev \
+					-I$(LOCAL_PATH)/shadowsocks-libev/libcork/include \
+					-I$(LOCAL_PATH)/shadowsocks-libev/libbloom \
 					-I$(LOCAL_PATH)/include/shadowsocks-libev
 
-LOCAL_STATIC_LIBRARIES := libev libmbedtls libsodium libcork libudns libancillary
+LOCAL_STATIC_LIBRARIES := libev libmbedtls libsodium libcork libbloom libudns libancillary
 
 LOCAL_LDLIBS := -llog
 
@@ -475,6 +478,17 @@ libpcre_src_files := \
 LOCAL_SRC_FILES := $(addprefix pcre/, $(libpcre_src_files))
 
 include $(BUILD_STATIC_LIBRARY)
+
+########################################################
+## overture
+########################################################
+
+include $(CLEAR_VARS)
+
+LOCAL_MODULE := overture
+LOCAL_SRC_FILES := overture/$(TARGET_ARCH_ABI)/liboverture.so
+
+include $(PREBUILT_SHARED_LIBRARY)
 
 # Import cpufeatures
 $(call import-module,android/cpufeatures)

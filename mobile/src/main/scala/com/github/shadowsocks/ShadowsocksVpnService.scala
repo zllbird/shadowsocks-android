@@ -22,6 +22,8 @@ package com.github.shadowsocks
 
 import java.io.File
 import java.util.Locale
+import java.net.InetAddress
+import java.net.Inet6Address
 
 import android.content._
 import android.content.pm.PackageManager.NameNotFoundException
@@ -45,8 +47,7 @@ class ShadowsocksVpnService extends VpnService with BaseService {
   private var notification: ShadowsocksNotification = _
 
   var sslocalProcess: GuardedProcess = _
-  var sstunnelProcess: GuardedProcess = _
-  var pdnsdProcess: GuardedProcess = _
+  var overtureProcess: GuardedProcess = _
   var tun2socksProcess: GuardedProcess = _
 
   override def onBind(intent: Intent): IBinder = {
@@ -94,17 +95,13 @@ class ShadowsocksVpnService extends VpnService with BaseService {
       sslocalProcess.destroy()
       sslocalProcess = null
     }
-    if (sstunnelProcess != null) {
-      sstunnelProcess.destroy()
-      sstunnelProcess = null
-    }
     if (tun2socksProcess != null) {
       tun2socksProcess.destroy()
       tun2socksProcess = null
     }
-    if (pdnsdProcess != null) {
-      pdnsdProcess.destroy()
-      pdnsdProcess = null
+    if (overtureProcess != null) {
+      overtureProcess.destroy()
+      overtureProcess = null
     }
   }
 
@@ -143,21 +140,20 @@ class ShadowsocksVpnService extends VpnService with BaseService {
     if (profile.route != Acl.ALL && profile.route != Acl.CUSTOM_RULES)
       AclSyncJob.schedule(profile.route)
 
-    notification = new ShadowsocksNotification(this, profile.getName)
+    notification = new ShadowsocksNotification(this, profile.name)
   }
 
   /** Called when the activity is first created. */
   def handleConnection() {
     
-    val fd = startVpn()
-    if (!sendFd(fd)) throw new Exception("sendFd failed")
-
     startShadowsocksDaemon()
 
     if (!profile.udpdns) {
       startDnsDaemon()
-      startDnsTunnel()
     }
+
+    val fd = startVpn()
+    if (!sendFd(fd)) throw new Exception("sendFd failed")
   }
 
   override protected def buildPluginCommandLine(): ArrayBuffer[String] = super.buildPluginCommandLine() += "-V"
@@ -165,12 +161,11 @@ class ShadowsocksVpnService extends VpnService with BaseService {
   def startShadowsocksDaemon() {
     val cmd = ArrayBuffer[String](getApplicationInfo.nativeLibraryDir + "/libss-local.so",
       "-V",
+      "-u",
       "-b", "127.0.0.1",
       "-l", profile.localPort.toString,
       "-t", "600",
       "-c", buildShadowsocksConfig("ss-local-vpn.conf"))
-
-    if (profile.udpdns) cmd += "-u"
 
     if (profile.route != Acl.ALL) {
       cmd += "--acl"
@@ -182,33 +177,10 @@ class ShadowsocksVpnService extends VpnService with BaseService {
     sslocalProcess = new GuardedProcess(cmd: _*).start()
   }
 
-  def startDnsTunnel(): Unit =
-    sstunnelProcess = new GuardedProcess(getApplicationInfo.nativeLibraryDir + "/libss-tunnel.so",
-      "-V",
-      "-t", "10",
-      "-b", "127.0.0.1",
-      "-l", (profile.localPort + 63).toString,
-      "-L" , profile.remoteDns + ":53",
-      "-c", buildShadowsocksConfig("ss-tunnel-vpn.conf")).start()
-
   def startDnsDaemon() {
-    val reject = if (profile.ipv6) "224.0.0.0/3" else "224.0.0.0/3, ::/0"
-    IOUtils.writeString(new File(getFilesDir, "pdnsd-vpn.conf"), profile.route match {
-      case Acl.BYPASS_CHN | Acl.BYPASS_LAN_CHN | Acl.GFWLIST | Acl.CUSTOM_RULES =>
-        ConfigUtils.PDNSD_DIRECT.formatLocal(Locale.ENGLISH, "protect = \"protect_path\";", getCacheDir.getAbsolutePath,
-          "0.0.0.0", profile.localPort + 53, "114.114.114.114, 223.5.5.5, 1.2.4.8",
-          getBlackList, reject, profile.localPort + 63, reject)
-      case Acl.CHINALIST =>
-        ConfigUtils.PDNSD_DIRECT.formatLocal(Locale.ENGLISH, "protect = \"protect_path\";", getCacheDir.getAbsolutePath,
-          "0.0.0.0", profile.localPort + 53, "8.8.8.8, 8.8.4.4, 208.67.222.222",
-          "", reject, profile.localPort + 63, reject)
-      case _ =>
-        ConfigUtils.PDNSD_LOCAL.formatLocal(Locale.ENGLISH, "protect = \"protect_path\";", getCacheDir.getAbsolutePath,
-          "0.0.0.0", profile.localPort + 53, profile.localPort + 63, reject)
-    })
-    val cmd = Array(getApplicationInfo.nativeLibraryDir + "/libpdnsd.so", "-c", "pdnsd-vpn.conf")
-
-    pdnsdProcess = new GuardedProcess(cmd: _*).start()
+    overtureProcess = new GuardedProcess(getApplicationInfo.nativeLibraryDir + "/liboverture.so",
+      "-c", buildOvertureConfig("overture-vpn.conf"), "-V")
+      .start()
   }
 
   def startVpn(): Int = {
@@ -219,7 +191,7 @@ class ShadowsocksVpnService extends VpnService with BaseService {
       .setMtu(VPN_MTU)
       .addAddress(PRIVATE_VLAN.formatLocal(Locale.ENGLISH, "1"), 24)
 
-    builder.addDnsServer(profile.remoteDns)
+    builder.addDnsServer("8.8.8.8") // It's fake DNS for tun2socks, not the real remote DNS
 
     if (profile.ipv6) {
       builder.addAddress(PRIVATE_VLAN6.formatLocal(Locale.ENGLISH, "1"), 126)
@@ -251,7 +223,11 @@ class ShadowsocksVpnService extends VpnService with BaseService {
         val subnet = Subnet.fromString(cidr)
         builder.addRoute(subnet.address.getHostAddress, subnet.prefixSize)
       })
-      builder.addRoute(profile.remoteDns, 32)
+      val addr = InetAddress.getByName(profile.remoteDns.trim)
+      if (addr.isInstanceOf[Inet6Address])
+        builder.addRoute(addr, 128)
+      else if (addr.isInstanceOf[InetAddress])
+        builder.addRoute(addr, 32)
     }
 
     conn = builder.establish()
@@ -271,9 +247,9 @@ class ShadowsocksVpnService extends VpnService with BaseService {
     if (profile.ipv6)
       cmd += ("--netif-ip6addr", PRIVATE_VLAN6.formatLocal(Locale.ENGLISH, "2"))
 
-    if (profile.udpdns)
-      cmd += "--enable-udprelay"
-    else
+    cmd += "--enable-udprelay"
+
+    if (!profile.udpdns)
       cmd += ("--dnsgw", "%s:%d".formatLocal(Locale.ENGLISH, PRIVATE_VLAN.formatLocal(Locale.ENGLISH, "1"),
         profile.localPort + 53))
 
